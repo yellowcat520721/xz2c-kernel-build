@@ -14,6 +14,9 @@
 #   BINUTILS      apt | los49     (default apt   - where ld/objcopy/ar come from)
 #   LD_KIND       gnu | lld       (default gnu   - which linker to use)
 #   MAKE_JOBS     -jN             (default nproc)
+#   CROSS_COMPILE_ARM32  prefix of a 32-bit ARM compiler for the compat vDSO
+#                        (default arm-linux-gnueabi-; the tree hard-errors with
+#                         "CROSS_COMPILE_ARM32 not defined or empty" without it)
 #
 # NOTE: AOSP's gitiles archives of prebuilts/gcc/.../aarch64-linux-android-4.9
 # are EMPTY now (0 bytes), which is what made the first CI run fail at the
@@ -30,6 +33,7 @@ DEFCONFIG="${DEFCONFIG:-tama_apollo_defconfig}"
 BINUTILS="${BINUTILS:-apt}"
 LD_KIND="${LD_KIND:-gnu}"
 MAKE_JOBS="${MAKE_JOBS:-$(nproc)}"
+CROSS_COMPILE_ARM32="${CROSS_COMPILE_ARM32:-arm-linux-gnueabi-}"
 
 CLANG_BASE="https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main"
 LOS49_URL="https://codeload.github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9/tar.gz/refs/heads/lineage-19.1"
@@ -101,6 +105,27 @@ log "toolchain"
 echo "  CLANG_VERSION   = $CLANG_VERSION"
 echo "  CROSS_COMPILE   = $CROSS_COMPILE"
 echo "  BINUTILS        = $BINUTILS   LD_KIND = $LD_KIND"
+echo "  ARM32 prefix    = $CROSS_COMPILE_ARM32 (compat vDSO)"
+
+# The arm64 tree requires a 32-bit ARM toolchain whenever CONFIG_COMPAT_VDSO is
+# on ("CROSS_COMPILE_ARM32 not defined or empty"), so find one now and remember
+# whether we have it - the defconfig decides if it is actually needed.
+HAVE_ARM32=0
+for p in "$CROSS_COMPILE_ARM32" arm-linux-gnueabi- arm-linux-gnueabihf- arm-none-eabi-; do
+  [ -n "$p" ] || continue
+  if command -v "${p}gcc" >/dev/null 2>&1; then
+    CROSS_COMPILE_ARM32="$p"
+    HAVE_ARM32=1
+    break
+  fi
+done
+if [ "$HAVE_ARM32" = "1" ]; then
+  echo "  ARM32 compiler  = ${CROSS_COMPILE_ARM32}gcc -> $(command -v "${CROSS_COMPILE_ARM32}gcc")"
+  "${CROSS_COMPILE_ARM32}gcc" --version | head -n1
+else
+  echo "  ARM32 compiler  = NOT FOUND (compat vDSO will have to be disabled)"
+fi
+
 for t in clang llvm-ar llvm-nm llvm-objcopy llvm-objdump llvm-readelf llvm-strip \
          "${CROSS_COMPILE}ld" "${CROSS_COMPILE}as" "${CROSS_COMPILE}ar" \
          "${CROSS_COMPILE}nm" "${CROSS_COMPILE}objcopy"; do
@@ -172,6 +197,9 @@ tail -n 5 "$DC"
 
 # --------------------------------------------------------------------- build
 MAKE_ARGS="-j$MAKE_JOBS O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=$CROSS_COMPILE KCFLAGS=-Wno-error"
+if [ "$HAVE_ARM32" = "1" ]; then
+  MAKE_ARGS="$MAKE_ARGS CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32"
+fi
 if [ "$LD_KIND" = "lld" ]; then
   MAKE_ARGS="$MAKE_ARGS LD=ld.lld"
   command -v ld.lld >/dev/null 2>&1 || die "LD_KIND=lld but ld.lld is not available"
@@ -181,6 +209,28 @@ echo "MAKE_ARGS = $MAKE_ARGS"
 stage "make-defconfig"
 log "defconfig"
 make $MAKE_ARGS "$DEFCONFIG" || die "make $DEFCONFIG failed (see the log above)"
+
+# arch/arm64/Makefile hard-errors when CONFIG_COMPAT_VDSO is on and
+# CROSS_COMPILE_ARM32 is empty.  If we have no 32-bit compiler, turn the compat
+# vDSO off (it is only a 32-bit gettimeofday fast path; nothing breaks, 32-bit
+# apps just take the syscall route).
+if grep -q '^CONFIG_COMPAT_VDSO=y' out/.config; then
+  if [ "$HAVE_ARM32" = "1" ]; then
+    log "CONFIG_COMPAT_VDSO=y and we have ${CROSS_COMPILE_ARM32}gcc - keeping it"
+  else
+    log "WARNING: CONFIG_COMPAT_VDSO=y but no 32-bit ARM compiler -> disabling the compat vDSO"
+    if [ -x scripts/config ]; then
+      ./scripts/config --file out/.config --disable COMPAT_VDSO
+    else
+      sed -i 's/^CONFIG_COMPAT_VDSO=y/# CONFIG_COMPAT_VDSO is not set/' out/.config
+    fi
+    make $MAKE_ARGS olddefconfig >/dev/null 2>&1 || true
+    if grep -q '^CONFIG_COMPAT_VDSO=y' out/.config; then
+      die "compat vDSO cannot be disabled in this tree - install gcc-arm-linux-gnueabi (or set CROSS_COMPILE_ARM32)"
+    fi
+    echo "  CONFIG_COMPAT_VDSO is now disabled"
+  fi
+fi
 
 stage "make-Image.gz"
 log "building Image.gz (expect 10-30 minutes)"
@@ -245,6 +295,7 @@ unzip -l "$OUT/$NAME" | head -n 20
   echo "KernelSU-Next    : $KSU_DESC ($KSU_COMMIT), ref=$KSU_REF"
   echo "clang            : $CLANG_VERSION ($(clang --version | head -n1))"
   echo "binutils         : $BINUTILS / CROSS_COMPILE=$CROSS_COMPILE"
+  echo "arm32 toolchain  : $([ "$HAVE_ARM32" = 1 ] && echo "${CROSS_COMPILE_ARM32}gcc" || echo "none (compat vDSO disabled)")"
   echo "linker           : $LD_KIND"
   echo "defconfig        : $DEFCONFIG"
   echo "built at         : $(date -u)"
