@@ -58,18 +58,21 @@ jobs:
             bc bison flex libssl-dev libelf-dev zip unzip rsync cpio \
             python3 python-is-python3 curl git lz4 zstd \
             binutils-aarch64-linux-gnu
+          echo "--- binutils check ---"
+          aarch64-linux-gnu-ld --version | head -n1 || echo "!! aarch64-linux-gnu-ld MISSING"
 
       - name: Show host info
         run: |
           nproc; free -h; df -h /
           gcc --version | head -n1
-          aarch64-linux-gnu-ld --version | head -n1
 
-      - name: Cache toolchains
+      # 只缓存 clang：上次失败的 run 在 toolchains/gcc 里留下了空目录，
+      # 整个 toolchains 一起缓存会把这个坏状态带进来
+      - name: Cache clang toolchain
         uses: actions/cache@v4
         with:
-          path: toolchains
-          key: tc-${{ inputs.clang_version }}-${{ inputs.binutils }}
+          path: toolchains/clang
+          key: clang-${{ inputs.clang_version }}-v2
 
       - name: Build kernel with KernelSU-Next
         env:
@@ -83,6 +86,21 @@ jobs:
           MAKE_JOBS: ${{ inputs.make_jobs }}
         run: |
           bash scripts/build.sh 2>&1 | tee build.log
+
+      - name: Show build failure summary
+        if: always()
+        run: |
+          {
+            echo "### kernel build summary"
+            echo ""
+            echo "- stage reached: \`$(cat out/.stage 2>/dev/null || echo none)\`"
+            echo "- build.log: $(wc -l < build.log 2>/dev/null || echo 0) lines"
+            echo "- toolchain dirs: $(ls toolchains 2>/dev/null | tr '\n' ' ')"
+            echo ""
+            echo '```'
+            tail -n 45 build.log 2>/dev/null || echo "(no build.log)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify the built kernel really contains KernelSU
         run: bash scripts/verify.sh
@@ -104,5 +122,6 @@ jobs:
           name: build-log
           path: |
             build.log
+            out/.stage
             out/*.txt
           if-no-files-found: warn
