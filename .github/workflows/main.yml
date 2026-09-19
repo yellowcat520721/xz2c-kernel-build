@@ -1,7 +1,7 @@
 name: Build KernelSU-Next kernel (XZ2C apollo 4.9.337)
 
 # 手动触发：Actions 页面 -> "Run workflow"
-# 产物：可刷入的 AnyKernel3 zip（recovery 里刷） + Image.gz-dtb + 日志
+# 产物：可刷入的 AnyKernel3 zip（recovery 里刷） + Image.gz-dtb + 构建日志
 on:
   workflow_dispatch:
     inputs:
@@ -25,6 +25,14 @@ on:
         description: 'defconfig 名字'
         required: true
         default: 'tama_apollo_defconfig'
+      binutils:
+        description: 'binutils 来源：apt（推荐）或 los49（LineageOS 镜像的 gcc-4.9）'
+        required: true
+        default: 'apt'
+      ld_kind:
+        description: '链接器：gnu（默认）或 lld（GNU ld 报错时改这个再跑）'
+        required: true
+        default: 'gnu'
       make_jobs:
         description: '并行编译数（留空 = 自动）'
         required: false
@@ -35,7 +43,7 @@ permissions:
 
 jobs:
   build:
-    # 22.04 的 host gcc 11 对 4.9 这种老内核更友好
+    # 22.04 的 host gcc 11 / binutils 2.38 对 4.9 这种老内核更友好
     runs-on: ubuntu-22.04
     timeout-minutes: 150
 
@@ -48,11 +56,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev zip unzip rsync cpio \
-            python3 python-is-python3 curl git lz4 zstd
+            python3 python-is-python3 curl git lz4 zstd \
+            binutils-aarch64-linux-gnu
 
       - name: Show host info
         run: |
-          nproc; free -h; df -h /; gcc --version | head -n1; python3 --version
+          nproc; free -h; df -h /
+          gcc --version | head -n1
+          aarch64-linux-gnu-ld --version | head -n1
+
+      - name: Cache toolchains
+        uses: actions/cache@v4
+        with:
+          path: toolchains
+          key: tc-${{ inputs.clang_version }}-${{ inputs.binutils }}
 
       - name: Build kernel with KernelSU-Next
         env:
@@ -61,6 +78,8 @@ jobs:
           KSU_REF: ${{ inputs.ksu_ref }}
           CLANG_VERSION: ${{ inputs.clang_version }}
           DEFCONFIG: ${{ inputs.defconfig }}
+          BINUTILS: ${{ inputs.binutils }}
+          LD_KIND: ${{ inputs.ld_kind }}
           MAKE_JOBS: ${{ inputs.make_jobs }}
         run: |
           bash scripts/build.sh 2>&1 | tee build.log
