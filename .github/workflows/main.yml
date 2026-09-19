@@ -29,6 +29,10 @@ on:
         description: 'binutils 来源：apt（推荐）或 los49（LineageOS 镜像的 gcc-4.9）'
         required: true
         default: 'apt'
+      cross_compile_arm32:
+        description: '32 位 ARM 工具链前缀（compat vDSO 需要）'
+        required: true
+        default: 'arm-linux-gnueabi-'
       ld_kind:
         description: '链接器：gnu（默认）或 lld（GNU ld 报错时改这个再跑）'
         required: true
@@ -57,16 +61,19 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev libelf-dev zip unzip rsync cpio \
             python3 python-is-python3 curl git lz4 zstd \
-            binutils-aarch64-linux-gnu
-          echo "--- binutils check ---"
-          aarch64-linux-gnu-ld --version | head -n1 || echo "!! aarch64-linux-gnu-ld MISSING"
+            binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
+            gcc-arm-linux-gnueabihf binutils-arm-linux-gnueabihf
+          echo "--- toolchain check ---"
+          aarch64-linux-gnu-ld --version  | head -n1 || echo "!! aarch64-linux-gnu-ld MISSING"
+          arm-linux-gnueabi-gcc --version | head -n1 || echo "!! arm-linux-gnueabi-gcc MISSING"
 
       - name: Show host info
         run: |
           nproc; free -h; df -h /
           gcc --version | head -n1
 
-      # 只缓存 clang：上次失败的 run 在 toolchains/gcc 里留下了空目录，
+      # 只缓存 clang：之前失败的 run 在 toolchains/gcc 里留下了空目录，
       # 整个 toolchains 一起缓存会把这个坏状态带进来
       - name: Cache clang toolchain
         uses: actions/cache@v4
@@ -82,6 +89,7 @@ jobs:
           CLANG_VERSION: ${{ inputs.clang_version }}
           DEFCONFIG: ${{ inputs.defconfig }}
           BINUTILS: ${{ inputs.binutils }}
+          CROSS_COMPILE_ARM32: ${{ inputs.cross_compile_arm32 }}
           LD_KIND: ${{ inputs.ld_kind }}
           MAKE_JOBS: ${{ inputs.make_jobs }}
         run: |
